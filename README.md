@@ -17,9 +17,12 @@ implementations it unifies — micro-markets carried the other).
 - **Per-identity daily request quota** (blocks before upstream).
 - **In-flight reservations** — admission is atomic per budget identity and for the
   global ceiling: the gate counts recorded usage *plus* calls still in flight, so
-  parallel callers cannot exceed the request quota, nor a USD limit by more than
-  one call. An in-flight call reserves the largest single-call cost seen that day
-  (cost is only known afterwards). Every request sent upstream burns the request
+  parallel callers cannot exceed the request quota, and overshoot a USD limit by
+  about one call at most. An in-flight call's cost is only known afterwards, so it
+  reserves an estimate: the largest single-call cost seen that day, or after a
+  restart the identity's average recorded call cost. Calls costlier than the
+  estimate, and the first parallel burst of a day with no usage yet, can overshoot
+  by more. Every request sent upstream burns the request
   quota whatever its outcome (error, timeout); non-`ok` ones are counted
   in-process (reset on restart), since the store only counts `ok` rows.
 - **Cost tracking** per model: spend, prompt/completion tokens, cached tokens

@@ -147,6 +147,16 @@ check.("8 parallel 0.10 calls at 0.10/0.50 spent: 4 admitted, like sequential (g
 check.("parallel spend stays within the limit plus one call (spent #{u.spent_usd})",
   Decimal.compare(u.spent_usd, Decimal.new("0.60")) != :gt)
 
+# After a restart no cost has been seen in-process: the reservation falls back
+# to the identity's average recorded call cost (fresh proxy state, used store).
+s = setup.(%{})
+{token, id} = s.session.("restart")
+for _ <- 1..9, do: ReservationStore.record_llm_call(id, day, "sid", %{cost_usd: "0.05"})
+parallel.(for _ <- 1..8, do: fn -> s.req.(token, ok_upstream.(0.10)) end)
+u = ReservationStore.usage(id, day)
+check.("after a restart, 8 parallel 0.10 calls at 0.45/0.50: 1 admitted (got #{sent.()})", sent.() == 1)
+check.("...and spend stays within the limit plus one call (spent #{u.spent_usd})", eq.(u.spent_usd, "0.55"))
+
 # ── 3. Global ceiling counts in-flight calls across identities ───────────────
 s = setup.(%{default_daily_limit: Decimal.new("5.00"), global_daily_limit: Decimal.new("0.30")})
 {first, _} = s.session.("g0")

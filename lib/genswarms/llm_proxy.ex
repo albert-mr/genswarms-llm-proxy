@@ -2803,7 +2803,7 @@ defmodule Genswarms.LlmProxy do
   # this Agent's state under `:gate`, keyed by the request (handler) pid:
   #
   #   gate_enter/3  registers the request as PENDING, before the store is read;
-  #   gate_admit/4  atomically computes what is ahead of the request, runs the
+  #   gate_admit/5  atomically computes what is ahead of the request, runs the
   #                 (pure) decision and marks the reservation ADMITTED;
   #   gate_leave/2  releases it — explicitly before the response is sent, again
   #                 from an `after` in Plug.call/2, and lazily for dead pids.
@@ -2812,6 +2812,10 @@ defmodule Genswarms.LlmProxy do
   # requests released after it entered (its store snapshot may predate their
   # write). An in-flight call's cost is unknown, so it reserves the largest
   # single-call cost recorded today for its identity (else for any identity).
+  # `peak` is in-memory: until a cost is seen (fresh start) a call reserves its
+  # identity's average recorded call cost from the store snapshot instead.
+  # ponytail: an estimate, not a bound — with no usage recorded today the first
+  # parallel burst reserves nothing; serialize cold calls if that ever matters.
   # `extra` counts requests that were sent upstream but recorded no status "ok"
   # row (errors, timeouts, killed handlers): the store contract only counts
   # "ok" rows, so these burn the request quota here, in-process.
@@ -2832,7 +2836,9 @@ defmodule Genswarms.LlmProxy do
   @doc false
   # `decide` is a PURE fn(ahead) -> {admit?, reason}; it runs inside the Agent
   # (no store or Agent calls). A raise in it is re-raised in the caller.
-  def gate_admit(pid \\ @state_name, budget_identity, %Date{} = day, decide)
+  # `cold_est` is what this call reserves while no cost has been seen in-process
+  # today (fresh start, new day).
+  def gate_admit(pid \\ @state_name, budget_identity, %Date{} = day, cold_est, decide)
       when is_function(decide, 1) do
     me = self()
     zero = Decimal.new("0")
@@ -2860,7 +2866,7 @@ defmodule Genswarms.LlmProxy do
             e -> {false, {:gate_raised, e, __STACKTRACE__}}
           end
 
-        est = Map.get(gate.peak, key) || Map.get(gate.peak, {:any, day}) || zero
+        est = Map.get(gate.peak, key) || Map.get(gate.peak, {:any, day}) || cold_est
         entry = if admit?, do: %{entry | admitted: true, est: est}, else: entry
         {reason, Map.put(state, :gate, %{gate | inflight: Map.put(gate.inflight, me, entry)})}
       end)
@@ -6091,8 +6097,16 @@ defmodule Genswarms.LlmProxy.Plug do
 
     credits? = Map.get(opts, :credits_enabled, false)
 
+    # After a restart the gate has seen no cost yet: reserve the identity's
+    # average recorded call cost (the whole spend if no request was counted).
+    cold_est =
+      Decimal.div(
+        budget.spent_usd || Decimal.new("0"),
+        max(request_count(Map.get(budget, :requests, 0)), 1)
+      )
+
     reason =
-      Proxy.gate_admit(opts.state_pid, session.budget_identity, request_ctx.day, fn ahead ->
+      Proxy.gate_admit(opts.state_pid, session.budget_identity, request_ctx.day, cold_est, fn ahead ->
         cond do
           global_on? and global_exhausted?(global_limit, global_pg, ahead) -> {false, :global}
           request_quota_exhausted?(opts, budget, ahead.requests) -> {false, :request_quota}
